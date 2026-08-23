@@ -8781,3 +8781,2102 @@ function AutoCards(inHook, inText, inStop) {
 } function isolateLSIv2(code, log, text, stop) { const console = Object.freeze({log}); try { eval(code); return [null, text, stop]; } catch (error) { return [error, text, stop]; } }
 
 // Your other library scripts go here
+
+// =============================================================================
+// Story Card Extension (SCE) — integrated from https://github.com/Kenflesh/SCE-Story-Card-Extension
+// SCE enhances story cards with context recall, parent hierarchies, events, and more.
+// =============================================================================
+
+// ============================================================================
+// StoryCard Extension
+// ============================================================================
+
+const CONFIG_CARD_TITLE = "SCE Config";
+const DEFAULT_CONFIG = {
+ randomCardChance: 0.0,
+ randomEventChance: 0.05,
+ useOnlyAutouseCards: false,
+ eventDuration: 2,
+ useEventWeights: true,
+ useCardWeights: true,
+ currentEventTitle: "",
+ currentEventDurationLeft: 0,
+ alwaysIncludeCards: [],
+ contextRecallEnabled: true,
+ contextRecallThreshold: 0.05,
+ contextWindowChars: 10000,
+ contextRecallMaxCards: 5,
+ customStopWords: [],
+ recallInsertPosition: "bot",
+ recallDecayRate: 0.995,
+ cascadeEnabled: false,
+ cascadePriorityMultiplier: 1.3
+};
+
+// ============================================================================
+// Help functions
+// ============================================================================
+
+function getCardText(card) {
+ if (card.entry) return card.entry;
+ if (card.value) return card.value;
+ if (card.content) return card.content;
+ if (card.description) return card.description;
+ if (card.text) return card.text;
+ if (card.keys && card.keys.entry) return card.keys.entry;
+ return null;
+}
+
+function getCardTitle(card) {
+ return card.title || (card.keys && card.keys.title) || '';
+}
+
+function setCardText(card, newText) {
+ if (card.entry !== undefined) {
+ card.entry = newText;
+ } else if (card.value !== undefined) {
+ card.value = newText;
+ } else if (card.content !== undefined) {
+ card.content = newText;
+ } else if (card.description !== undefined) {
+ card.description = newText;
+ } else if (card.text !== undefined) {
+ card.text = newText;
+ } else if (card.keys && card.keys.entry !== undefined) {
+ card.keys.entry = newText;
+ } else {
+ card.entry = newText;
+ }
+}
+
+function hasAutouseTrigger(card) {
+ let keys = card.keys;
+ if (!keys) return false;
+ let keysStr = Array.isArray(keys) ? keys.join(' ') : keys;
+ return keysStr.toLowerCase().includes('autouse');
+}
+
+function isEventCard(card) {
+ let cardType = card.type || (card.keys && card.keys.type);
+ let customType = card.customType || (card.keys && card.keys.customType);
+ if (cardType === 'Event') return true;
+ if (cardType === 'Custom' && customType === 'Event') return true;
+ if (card.keys && card.keys.type === 'Custom' && card.keys.customType === 'Event') return true;
+ return false;
+}
+
+function getAllStoryCards() {
+ let cards = [];
+ if (typeof storyCards !== 'undefined' && Array.isArray(storyCards)) cards = cards.concat(storyCards);
+ if (typeof worldInfo !== 'undefined' && worldInfo && Array.isArray(worldInfo.storyCards)) cards = cards.concat(worldInfo.storyCards);
+ if (typeof state !== 'undefined' && state && state.worldInfo && Array.isArray(state.worldInfo.storyCards)) cards = cards.concat(state.worldInfo.storyCards);
+ if (typeof window !== 'undefined' && Array.isArray(window.storyCards)) cards = cards.concat(window.storyCards);
+ return cards.length > 0 ? cards : null;
+}
+
+function categorizeCards(allCards, useOnlyAutouse) {
+ let eventCards = [];
+ let regularCandidates = [];
+ // SIS system cards contain script infrastructure, not world info — exclude from SCE recall
+ const SIS_SYSTEM_TITLES = new Set(['inventory', 'custom commands']);
+ for (let card of allCards) {
+ let title = getCardTitle(card);
+ if (title.toLowerCase().includes('config')) continue;
+ if (SIS_SYSTEM_TITLES.has(title.toLowerCase())) continue;
+
+ if (isEventCard(card)) {
+ eventCards.push(card);
+ } else {
+ regularCandidates.push(card);
+ }
+ }
+ let regularCards = useOnlyAutouse
+ ? regularCandidates.filter(card => hasAutouseTrigger(card))
+ : regularCandidates;
+ return { eventCards, regularCards };
+}
+
+// ============================================================================
+// Blocks creating
+// ============================================================================
+
+function formatAlwaysCardsBlock(cards) {
+ if (!cards || cards.length === 0) return null;
+ let entries = [];
+ for (let card of cards) {
+ let title = getCardTitle(card);
+ let content = getCardText(card);
+ if (content) {
+ entries.push(`• ${title}:\n{${content}};`);
+ }
+ }
+ if (entries.length === 0) return null;
+ return `[World Info:\n${entries.join('\n')}]`;
+}
+
+function formatRandomCard(card) {
+ let title = getCardTitle(card);
+ let content = getCardText(card);
+ if (!content) return null;
+ return `[Use the following information to enrich the story if it fits the current context:\n${title}. ${content}]`;
+}
+
+function formatEventCard(card) {
+ let title = getCardTitle(card);
+ let content = getCardText(card);
+ if (!content) return null;
+ return `[The following event may occur:\n${title}:\n{${content}}\nDescribe it if there are no contradictions.]`;
+}
+
+function formatRecallSingle(cards) {
+ if (!cards || cards.length === 0) return null;
+ let items = [];
+ for (let card of cards) {
+ let title = getCardTitle(card);
+ let content = getCardText(card);
+ if (content) {
+ items.push(`• ${title}:\n{${content}};`);
+ }
+ }
+ if (items.length === 0) return null;
+ return `[The following information may be relevant to the current context:\n${items.join('\n')}]`;
+}
+
+function formatHierarchy(cards, definedSet) {
+ if (!cards || cards.length === 0) return null;
+ let items = [];
+
+ for (let i = 0; i < cards.length; i++) {
+ let card = cards[i];
+ let title = getCardTitle(card);
+ let content = getCardText(card);
+
+ if (!content) continue;
+
+ let pathTitles = [];
+ for (let j = 0; j <= i; j++) {
+ pathTitles.push(getCardTitle(cards[j]));
+ }
+ let breadcrumbs = `[${pathTitles.join(' > ')}]`;
+
+ if (definedSet && definedSet.has(title)) {
+ continue;
+ } else {
+ items.push(`${breadcrumbs}:\n${content}`);
+ }
+ }
+
+ if (items.length === 0) return null;
+ return items.join('\n');
+}
+
+function formatAllHierarchies(hierarchyStrings) {
+ if (!hierarchyStrings || hierarchyStrings.length === 0) return null;
+ let blocks = [];
+ for (let i = 0; i < hierarchyStrings.length; i++) {
+ blocks.push(`{Hierarchy ${i+1}.\n${hierarchyStrings[i]}}`);
+ }
+ let combined = blocks.join('\n\n');
+ return `[Current hierarchies (each sub-item is part of the parent item above):\n${combined}\n]`;
+}
+
+function formatDefinitionsBlock(cards) {
+ if (!cards || cards.length === 0) return null;
+ let items = [];
+ for (let card of cards) {
+ let title = getCardTitle(card);
+ let content = getCardText(card);
+ if (!content) continue;
+ let parentTitle = getCardParent(card);
+ let displayTitle = title;
+ if (parentTitle) {
+ displayTitle = `${title} (part of ${parentTitle})`;
+ }
+ items.push(`• ${displayTitle}:\n{${content}};`);
+ }
+ if (items.length === 0) return null;
+ return `[In the current context, the following terms refer to:\n${items.join('\n')}]`;
+}
+
+function formatRecallCandidate(candidate, definedSet) {
+ if (candidate.type === 'single') {
+ return formatRecallSingle(candidate.cards);
+ } else {
+ return formatHierarchy(candidate.cards, definedSet);
+ }
+}
+
+// ============================================================================
+// Config card
+// ============================================================================
+
+function generateConfigHelpText() {
+ return `===============================================
+STORY CARD EXTENSION CONFIGURATION GUIDE
+===============================================
+
+This card stores settings for the StoryCard Extension script.
+Edit the values below, then save the card. The script will automatically use the new settings.
+
+-------------------------------------------------------
+GENERAL
+-------------------------------------------------------
+useOnlyAutouseCards = true/false
+ - true: Only cards with the trigger "autouse" will ever be used.
+ - false: All story cards (except Events) are eligible for random selection and context recall.
+
+-------------------------------------------------------
+PARENT HIERARCHIES (linking cards)
+-------------------------------------------------------
+To create a hierarchy (e.g., City → Tavern), add parent=Title in the card's Triggers.
+Example Triggers: parent=CityName
+When a card is recalled, its entire parent chain (parent → parent of parent, etc.) is added automatically.
+The context will show relations like "Card (part of ParentCard)".
+
+-------------------------------------------------------
+RECALL (KEYWORD-BASED CARD TRIGGERING)
+-------------------------------------------------------
+contextRecallEnabled = true/false
+ - Master switch for the recall mechanic.
+
+contextRecallThreshold = 0.005
+ - Minimum coverage score (0.0 to 1.0) for a card to be recalled.
+ - Now based on how much of the card's content is covered by the context.
+ - Typically 0.15 works well; lower = more sensitive.
+
+contextWindowChars = 10000
+ - How many recent characters of the story are analyzed for keywords.
+
+contextRecallMaxCards = 4
+ - Maximum number of cards OR hierarchies recalled in one action.
+ - Example: 2 single cards + 2 hierarchies, or 4 hierarchies, etc.
+
+customStopWords = word1, word2, ...
+ - Extra words to ignore (case-insensitive). Useful for character names that cause false triggers.
+ - Example: customStopWords = YourCharacterName, shadow, eldrin
+
+recallInsertPosition = top / bot
+ - Where to insert recalled cards in the context.
+ - "top" = right after always-include cards (near the beginning).
+ - "bot" = near the end, just before events.
+
+recallDecayRate = 1.0
+ - Weight decay for tokens based on their distance from the end of the context.
+ - 1.0 means no decay (all tokens weight equally).
+ - Values < 1.0 make recent tokens count more. Example: 0.995 gives a mild recency bias.
+ - Lower values (e.g. 0.9) strongly focus on the very last sentences.
+
+-------------------------------------------------------
+CASCADE (iterative expansion of context during recall)
+-------------------------------------------------------
+cascadeEnabled = true/false
+ - If true, the script iteratively adds found cards to the working text, allowing deeper chains of related cards to be discovered.
+ - If false, only a single pass is performed (no contextual expansion).
+
+cascadePriorityMultiplier = 1.3
+ - When cascadeEnabled = true, this multiplier is applied to the score of a card whose parent (or any ancestor) has already been selected.
+ - Values > 1.0 give priority to direct descendants; set to 1.0 to disable the bonus.
+
+-------------------------------------------------------
+WEIGHT (affects random selection & recall sorting)
+-------------------------------------------------------
+Add weight=number in the card's Keys to increase (number>1) or decrease (0<number<1) its chance.
+Examples: weight=2, weight=0.5
+
+-------------------------------------------------------
+EVENTS (cards marked as "Event" type)
+-------------------------------------------------------
+randomEventChance = 0.1
+ - Probability (0.0 to 1.0) that a random Event card will trigger each action.
+
+eventDuration = 2
+ - How many actions the event will stay in the context after triggering.
+
+useEventWeights = true/false
+ - If true, respects weight=number triggers in the card's Keys for random selection.
+
+-------------------------------------------------------
+RANDOM CARDS (non-Event cards)
+-------------------------------------------------------
+randomCardChance = 0
+ - Probability (0.0 to 1.0) that a random story card is added to context each action.
+
+useCardWeights = true/false
+ - If true, uses weight=number triggers for random card selection.
+
+-------------------------------------------------------
+ALWAYS INCLUDE
+-------------------------------------------------------
+alwaysIncludeCards = cardTitle1, cardTitle2, ...
+ - Comma-separated list of story card titles that will be ALWAYS added to context.
+
+-------------------------------------------------------
+SYSTEM
+-------------------------------------------------------
+currentEventTitle / currentEventDurationLeft
+ - Used internally to track active events.
+=======================================================
+`;
+}
+
+function findConfigCard() {
+ let allCards = getAllStoryCards();
+ if (!allCards) return null;
+ return allCards.find(card => getCardTitle(card) === CONFIG_CARD_TITLE);
+}
+
+function readConfigFromCard(card) {
+ let config = { ...DEFAULT_CONFIG };
+ if (!card) return config;
+ let content = getCardText(card);
+ if (!content) return config;
+
+ try {
+ let parsed = JSON.parse(content);
+ if (typeof parsed === 'object' && parsed !== null) {
+ for (let key of Object.keys(DEFAULT_CONFIG)) {
+ if (parsed.hasOwnProperty(key)) {
+ config[key] = parsed[key];
+ }
+ }
+ return config;
+ }
+ } catch (e) {}
+
+ let lines = content.split('\n');
+ for (let line of lines) {
+ line = line.trim();
+ if (line === '' || line.startsWith('//') || line.startsWith('===')) continue;
+ let eqPos = line.indexOf('=');
+ if (eqPos === -1) eqPos = line.indexOf(':');
+ if (eqPos === -1) continue;
+ let key = line.slice(0, eqPos).trim();
+ let value = line.slice(eqPos + 1).trim();
+ switch (key) {
+ case 'randomCardChance':
+ case 'randomEventChance':
+ case 'contextRecallThreshold':
+ case 'recallDecayRate':
+ case 'cascadePriorityMultiplier':
+ config[key] = parseFloat(value);
+ break;
+ case 'eventDuration':
+ case 'contextWindowChars':
+ case 'contextRecallMaxCards':
+ case 'currentEventDurationLeft':
+ config[key] = parseInt(value, 10);
+ break;
+ case 'useOnlyAutouseCards':
+ case 'useEventWeights':
+ case 'useCardWeights':
+ case 'contextRecallEnabled':
+ case 'cascadeEnabled':
+ config[key] = (value.toLowerCase() === 'true');
+ break;
+ case 'alwaysIncludeCards':
+ config.alwaysIncludeCards = value.split(',').map(s => s.trim()).filter(s => s.length > 0);
+ break;
+ case 'customStopWords':
+ config.customStopWords = value.split(',').map(s => s.trim().toLowerCase()).filter(s => s.length > 0);
+ break;
+ case 'recallInsertPosition':
+ if (value.toLowerCase() === 'bot') config.recallInsertPosition = 'bot';
+ else config.recallInsertPosition = 'top';
+ break;
+ case 'currentEventTitle':
+ config.currentEventTitle = value;
+ break;
+ }
+ }
+ return config;
+}
+
+function writeConfigToCard(card, config) {
+ if (!card) return;
+ if (!card.description && card.description !== '') {
+ card.description = generateConfigHelpText();
+ }
+ let lines = [];
+ lines.push("// StoryCard Extension Configuration");
+ lines.push("// Edit values below, save the card, and the changes will apply immediately.");
+ lines.push("");
+ lines.push("// ----- General -----");
+ lines.push(`useOnlyAutouseCards = ${config.useOnlyAutouseCards}`);
+ lines.push("");
+ lines.push("// ----- Recall (keyword-based triggering) -----");
+ lines.push(`contextRecallEnabled = ${config.contextRecallEnabled}`);
+ lines.push(`contextRecallThreshold = ${config.contextRecallThreshold}`);
+ lines.push(`contextWindowChars = ${config.contextWindowChars}`);
+ lines.push(`contextRecallMaxCards = ${config.contextRecallMaxCards}`);
+ lines.push(`customStopWords = ${(config.customStopWords || []).join(', ')}`);
+ lines.push(`recallInsertPosition = ${config.recallInsertPosition === 'bot' ? 'bot' : 'top'}`);
+ lines.push(`recallDecayRate = ${config.recallDecayRate}`);
+ lines.push("");
+ lines.push("// ----- Cascade Settings -----");
+ lines.push(`cascadeEnabled = ${config.cascadeEnabled}`);
+ lines.push(`cascadePriorityMultiplier = ${config.cascadePriorityMultiplier}`);
+ lines.push("");
+ lines.push("// ----- Events -----");
+ lines.push(`randomEventChance = ${config.randomEventChance}`);
+ lines.push(`eventDuration = ${config.eventDuration}`);
+ lines.push(`useEventWeights = ${config.useEventWeights}`);
+ lines.push("");
+ lines.push("// ----- Random Cards -----");
+ lines.push(`randomCardChance = ${config.randomCardChance}`);
+ lines.push(`useCardWeights = ${config.useCardWeights}`);
+ lines.push("");
+ lines.push("// ----- Always Include (by story card title) -----");
+ lines.push(`alwaysIncludeCards = ${(config.alwaysIncludeCards || []).join(', ')}`);
+ lines.push("");
+ lines.push("// ----- System -----");
+ lines.push(`currentEventTitle = ${config.currentEventTitle || ''}`);
+ lines.push(`currentEventDurationLeft = ${config.currentEventDurationLeft || 0}`);
+
+ setCardText(card, lines.join('\n'));
+}
+
+function ensureConfigCard() {
+ let existing = findConfigCard();
+ if (existing) return existing;
+
+ let newCard = {
+ title: CONFIG_CARD_TITLE,
+ entry: "",
+ description: generateConfigHelpText(),
+ keys: "",
+ type: "Custom",
+ customType: "Config"
+ };
+
+ let added = false;
+ if (typeof storyCards !== 'undefined' && Array.isArray(storyCards)) {
+ storyCards.push(newCard);
+ added = true;
+ } else if (typeof worldInfo !== 'undefined' && worldInfo && Array.isArray(worldInfo.storyCards)) {
+ worldInfo.storyCards.push(newCard);
+ added = true;
+ } else if (typeof state !== 'undefined' && state && state.worldInfo && Array.isArray(state.worldInfo.storyCards)) {
+ state.worldInfo.storyCards.push(newCard);
+ added = true;
+ } else if (typeof window !== 'undefined' && Array.isArray(window.storyCards)) {
+ window.storyCards.push(newCard);
+ added = true;
+ }
+
+ if (!added) {
+ console.error("[SCE] Could not add config card – no suitable array found.");
+ return null;
+ }
+ writeConfigToCard(newCard, DEFAULT_CONFIG);
+ return newCard;
+}
+
+// ============================================================================
+// Weight functions
+// ============================================================================
+
+function getEventWeight(card) {
+ let keys = card.keys;
+ if (!keys) return 1;
+ let keysStr = Array.isArray(keys) ? keys.join(' ') : keys;
+ let match = keysStr.match(/weight=([\d.]+)/i);
+ if (match) {
+ let w = parseFloat(match[1]);
+ return isNaN(w) ? 1 : Math.max(0, w);
+ }
+ return 1;
+}
+
+function getEventDuration(card, globalDuration) {
+ let keys = card.keys;
+ if (!keys) return globalDuration;
+ let keysStr = Array.isArray(keys) ? keys.join(' ') : keys;
+ let match = keysStr.match(/duration=(\d+)/i);
+ if (match) {
+ let d = parseInt(match[1], 10);
+ return isNaN(d) ? globalDuration : Math.max(1, d);
+ }
+ return globalDuration;
+}
+
+function getCardWeight(card) {
+ let keys = card.keys;
+ if (!keys) return 1;
+ let keysStr = Array.isArray(keys) ? keys.join(' ') : keys;
+ let match = keysStr.match(/weight=([\d.]+)/i);
+ if (match) {
+ let w = parseFloat(match[1]);
+ return isNaN(w) ? 1 : Math.max(0, w);
+ }
+ return 1;
+}
+
+function getCardParent(card) {
+ let keys = card.keys;
+ if (!keys) return null;
+ let keysStr = Array.isArray(keys) ? keys.join(' ') : keys;
+ let match = keysStr.match(/parent=([^;,\n]+)/i);
+ if (match) {
+ return match[1].trim();
+ }
+ return null;
+}
+
+function selectCardByWeight(cards) {
+ if (!cards || cards.length === 0) return null;
+ let weights = cards.map(c => getCardWeight(c));
+ let totalWeight = weights.reduce((a, b) => a + b, 0);
+ if (totalWeight <= 0) return null;
+ let rand = Math.random() * totalWeight;
+ let accum = 0;
+ for (let i = 0; i < cards.length; i++) {
+ accum += weights[i];
+ if (rand < accum) return cards[i];
+ }
+ return cards[cards.length - 1];
+}
+
+function selectEventByWeight(events) {
+ if (!events || events.length === 0) return null;
+ let weights = events.map(e => getEventWeight(e));
+ let totalWeight = weights.reduce((a, b) => a + b, 0);
+ if (totalWeight <= 0) return null;
+ let rand = Math.random() * totalWeight;
+ let accum = 0;
+ for (let i = 0; i < events.length; i++) {
+ accum += weights[i];
+ if (rand < accum) return events[i];
+ }
+ return events[events.length - 1];
+}
+
+// ============================================================================
+// Tokens!
+// ============================================================================
+
+function computeHash(str) {
+ let hash = 5381;
+ for (let i = 0; i < str.length; i++) {
+ hash = ((hash << 5) + hash) ^ str.charCodeAt(i);
+ }
+ return hash >>> 0;
+}
+
+function computeCardHash(card) {
+ let content = getCardText(card) || '';
+ let title = getCardTitle(card);
+ return computeHash(title + '###' + content);
+}
+
+const DEFAULT_STOP_WORDS = new Set([
+ 'a', 'an', 'and', 'are', 'as', 'at', 'be', 'by', 'can', 'do', 'for', 'from', 'had', 'has', 'have',
+ 'he', 'her', 'his', 'i', 'in', 'is', 'it', 'its', 'me', 'my', 'of', 'on', 'or', 'she', 'that',
+ 'the', 'their', 'them', 'they', 'this', 'to', 'was', 'we', 'were', 'with', 'you', 'your', 'yes',
+ 'no', 'not', 'but', 'so', 'for', 'yet', 'nor', 'then', 'now', 'well', 'very', 'just', 'like',
+ 'such', 'than', 'then', 'there', 'these', 'those', 'will', 'would', 'could', 'should', 'may',
+ 'might', 'must', 'both', 'each', 'every', 'more', 'most', 'some', 'any', 'no', 'only', 'own',
+ 'same', 'than', 'that', 'then', 'thence', 'there', 'these', 'they', 'this', 'those', 'through',
+ 'until', 'unto', 'upon', 'us', 'use', 'used', 'using', 'we', 'what', 'when', 'where', 'which',
+ 'while', 'who', 'whom', 'why', 'with', 'within', 'without', 'your', 'yours', 'yourself'
+]);
+
+function simpleTokenize(text, extraStopWords = []) {
+ if (!text || typeof text !== 'string') return [];
+ let words = text.toLowerCase().replace(/[^a-z0-9а-яё]/gi, ' ').split(/\s+/);
+ let allStopWords = new Set(DEFAULT_STOP_WORDS);
+ for (let w of extraStopWords) {
+ allStopWords.add(w.toLowerCase());
+ }
+ return words.filter(w => w.length > 1 && !allStopWords.has(w));
+}
+
+function stripBrackets(text) {
+ return text.replace(/\[[^\]]*\]/g, '').replace(/\{[^}]*\}/g, '');
+}
+
+function cardCoverageScore(cardTokens, cardNorm, contextWeightMap, idfMap) {
+ if (!cardTokens || cardTokens.length === 0) return 0;
+ if (!contextWeightMap || cardNorm <= 0) return 0;
+ let intersectionWeight = 0;
+ for (let t of cardTokens) {
+ if (contextWeightMap.has(t)) {
+ let idf = 1;
+ if (idfMap && typeof idfMap.get === 'function') {
+ idf = idfMap.get(t) || 0;
+ }
+ intersectionWeight += contextWeightMap.get(t) * idf;
+ }
+ }
+ return intersectionWeight / cardNorm;
+}
+
+function getCardsSignature(regularCards) {
+ let items = [];
+ for (let card of regularCards) {
+ let title = getCardTitle(card);
+ let hash = computeCardHash(card);
+ items.push(title + ':' + hash);
+ }
+ items.sort();
+ return items.join('|');
+}
+
+function buildCardBags(regularCards, customStopWords) {
+ let tokenLists = [];
+ let totalCards = regularCards.length;
+ for (let card of regularCards) {
+ let title = getCardTitle(card);
+ let content = getCardText(card) || '';
+ let combined = (title ? title + ' ' : '') + content;
+ let tokens = combined ? simpleTokenize(combined, customStopWords) : [];
+ tokenLists.push({ title, tokens });
+ }
+
+ let docFreq = new Map();
+ for (let { tokens } of tokenLists) {
+ let uniqueTokens = new Set(tokens);
+ for (let t of uniqueTokens) {
+ docFreq.set(t, (docFreq.get(t) || 0) + 1);
+ }
+ }
+
+ let idfMap = new Map();
+ for (let [token, df] of docFreq.entries()) {
+ let idf = Math.log((1 + totalCards) / (1 + df));
+ idfMap.set(token, idf);
+ }
+
+ if (totalCards === 1 && idfMap.size > 0) {
+ for (let token of idfMap.keys()) {
+ idfMap.set(token, 1);
+ }
+ }
+
+ let bags = {};
+ for (let { title, tokens } of tokenLists) {
+ let cardNormSq = 0;
+ for (let t of tokens) {
+ let idf = idfMap.get(t) || 0;
+ cardNormSq += idf * idf;
+ }
+ let cardNorm = Math.sqrt(cardNormSq);
+ bags[title] = {
+ tokens: tokens,
+ norm: cardNorm
+ };
+ }
+
+ return { bags, idfMap };
+}
+
+// ============================================================================
+// Hierarchy
+// ============================================================================
+
+function findCardByTitle(title, allCards) {
+ if (!title) return null;
+ let normTitle = title.trim().toLowerCase().replace(/\s+/g, ' ');
+ return allCards.find(card => {
+ let cardTitle = getCardTitle(card);
+ if (!cardTitle) return false;
+ let normCardTitle = cardTitle.trim().toLowerCase().replace(/\s+/g, ' ');
+ return normCardTitle === normTitle;
+ });
+}
+
+function getCardHierarchy(card, allCards, visited = new Set()) {
+ if (!card) return [];
+ let title = getCardTitle(card);
+ if (visited.has(title)) {
+ console.warn("[SCE] Cycle detected for", title);
+ return [card];
+ }
+ visited.add(title);
+ let parentTitle = getCardParent(card);
+ if (parentTitle) {
+ let parentCard = findCardByTitle(parentTitle, allCards);
+ if (parentCard) {
+ let parentHierarchy = getCardHierarchy(parentCard, allCards, visited);
+ return [...parentHierarchy, card];
+ }
+ }
+ return [card];
+}
+
+function hierarchySimilarity(hierarchyCards, contextWeightMap, customStopWords, state) {
+ if (!hierarchyCards.length) return 0;
+ let scores = [];
+ for (let card of hierarchyCards) {
+ let title = getCardTitle(card);
+ let bag = state.__sceCardBags[title];
+ if (!bag) continue;
+ let score = cardCoverageScore(bag.tokens, bag.norm, contextWeightMap, state.__sceIdfMap);
+ scores.push(score);
+ }
+ if (scores.length === 0) return 0;
+ let product = scores.reduce((a, b) => a * b, 1);
+ return Math.pow(product, 1 / scores.length);
+}
+
+function candidateToPlainText(cand) {
+ if (cand.type === 'single') {
+ let parts = [];
+ for (let card of cand.cards) {
+ let title = getCardTitle(card);
+ let content = getCardText(card);
+ if (content) parts.push(`${title}: ${content};`);
+ }
+ return parts.join('\n');
+ } else {
+ return formatHierarchy(cand.cards, new Set());
+ }
+}
+
+// ============================================================================
+// Recall candidates
+// ============================================================================
+
+function selectRecallCandidates(text, allCards, regularCards, config) {
+ if (typeof state === 'undefined') { state = {}; }
+ if (!regularCards || regularCards.length === 0) {
+ console.log("[SCE] No regular cards for recall");
+ return [];
+ }
+ if (!state.__sceCardBags) state.__sceCardBags = {};
+
+ let currentSignature = getCardsSignature(regularCards);
+ let needRebuild = (state.__sceRecallSignature !== currentSignature);
+ let customStop = config.customStopWords || [];
+
+ if (needRebuild) {
+ let { bags, idfMap } = buildCardBags(regularCards, customStop);
+ state.__sceCardBags = bags;
+ state.__sceIdfMap = idfMap;
+ state.__sceRecallSignature = currentSignature;
+ console.log("[SCE] Rebuilt card bags with IDF. Cards:", regularCards.length);
+ } else {
+ if (!state.__sceIdfMap) {
+ let { bags, idfMap } = buildCardBags(regularCards, customStop);
+ state.__sceCardBags = bags;
+ state.__sceIdfMap = idfMap;
+ }
+ }
+
+ let decayRate = config.recallDecayRate !== undefined ? config.recallDecayRate : 1.0;
+ decayRate = Math.min(1.0, Math.max(0.0, decayRate));
+ let threshold = config.contextRecallThreshold !== undefined ? config.contextRecallThreshold : 0.001;
+ let maxCards = config.contextRecallMaxCards || 1;
+ let contextWindow = config.contextWindowChars || 3000;
+
+ function buildWeightMap(txt) {
+ let cleanText = stripBrackets(txt);
+ let recentClean = cleanText.slice(-contextWindow);
+ let recentRaw = txt.slice(-contextWindow);
+ let tokensClean = simpleTokenize(recentClean, customStop);
+ let tokensRaw = simpleTokenize(recentRaw, customStop);
+
+ function makeMap(tokensArray) {
+ let map = new Map();
+ let n = tokensArray.length;
+ for (let i = 0; i < n; i++) {
+ let dist = n - 1 - i;
+ let w = Math.pow(decayRate, dist);
+ let token = tokensArray[i];
+ let existing = map.get(token) || 0;
+ if (w > existing) {
+ map.set(token, w);
+ }
+ }
+ return map;
+ }
+
+ return {
+ weightMapClean: makeMap(tokensClean),
+ weightMapRaw: makeMap(tokensRaw)
+ };
+ }
+
+ if (!config.cascadeEnabled) {
+ let { weightMapClean, weightMapRaw } = buildWeightMap(text);
+ let singles = [], hierarchies = [];
+
+ for (let card of regularCards) {
+ let title = getCardTitle(card);
+ if (isEventCard(card) || title.toLowerCase().includes('config')) continue;
+ if (getCardParent(card)) continue;
+
+ let bag = state.__sceCardBags[title];
+ if (!bag || bag.tokens.length === 0) continue;
+ let score = cardCoverageScore(bag.tokens, bag.norm, weightMapClean, state.__sceIdfMap);
+ if (score >= threshold) {
+ let weight = getCardWeight(card);
+ singles.push({
+ type: 'single',
+ card: card,
+ score: score,
+ weightedScore: score * weight,
+ cards: [card]
+ });
+ }
+ }
+ for (let card of regularCards) {
+ let title = getCardTitle(card);
+ if (isEventCard(card) || title.toLowerCase().includes('config')) continue;
+ if (!getCardParent(card)) continue;
+
+ let hierarchy = getCardHierarchy(card, allCards);
+ if (!hierarchy.length) continue;
+
+ let hierarchyScore = hierarchySimilarity(hierarchy, weightMapRaw, customStop, state);
+ if (hierarchyScore >= threshold) {
+ let weight = getCardWeight(card);
+ hierarchies.push({
+ type: 'hierarchy',
+ hierarchy: hierarchy,
+ score: hierarchyScore,
+ weightedScore: hierarchyScore * weight,
+ leafCard: card,
+ cards: hierarchy
+ });
+ }
+ }
+
+ let allCandidates = [...singles, ...hierarchies];
+ allCandidates.sort((a, b) => b.weightedScore - a.weightedScore);
+ let selected = allCandidates.slice(0, maxCards);
+ console.log(`[SCE] Single pass, selected: ${selected.length}`);
+ return selected;
+ }
+
+ let cascadeMultiplier = config.cascadePriorityMultiplier || 1.0;
+ let workingText = text;
+ let usedOverallTitles = new Set();
+ let allSelected = [];
+ let maxIterations = 10;
+ let firstIteration = true;
+
+ for (let iter = 0; iter < maxIterations; iter++) {
+ let { weightMapClean, weightMapRaw } = buildWeightMap(workingText);
+ let singles = [], hierarchies = [];
+
+ for (let card of regularCards) {
+ let title = getCardTitle(card);
+ if (isEventCard(card) || title.toLowerCase().includes('config')) continue;
+ if (usedOverallTitles.has(title)) continue;
+ if (getCardParent(card)) continue;
+
+ let bag = state.__sceCardBags[title];
+ if (!bag || bag.tokens.length === 0) continue;
+ let score = cardCoverageScore(bag.tokens, bag.norm, weightMapClean, state.__sceIdfMap);
+ if (score >= threshold) {
+ let weight = getCardWeight(card);
+ let weightedScore = score * weight;
+ if (!firstIteration) {
+ weightedScore *= cascadeMultiplier;
+ }
+ singles.push({
+ type: 'single',
+ card: card,
+ score: score,
+ weightedScore: weightedScore,
+ cards: [card]
+ });
+ }
+ }
+
+ for (let card of regularCards) {
+ let title = getCardTitle(card);
+ if (isEventCard(card) || title.toLowerCase().includes('config')) continue;
+ if (!getCardParent(card)) continue;
+ if (usedOverallTitles.has(title)) continue;
+
+ let hierarchy = getCardHierarchy(card, allCards);
+ if (!hierarchy.length) continue;
+
+ let hierarchyScore = hierarchySimilarity(hierarchy, weightMapRaw, customStop, state);
+ if (hierarchyScore >= threshold) {
+ let weight = getCardWeight(card);
+ let weightedScore = hierarchyScore * weight;
+ if (!firstIteration) {
+ weightedScore *= cascadeMultiplier;
+ }
+ hierarchies.push({
+ type: 'hierarchy',
+ hierarchy: hierarchy,
+ score: hierarchyScore,
+ weightedScore: weightedScore,
+ leafCard: card,
+ cards: hierarchy
+ });
+ }
+ }
+
+ let candidatesThisRound = [...singles, ...hierarchies];
+ if (candidatesThisRound.length === 0) break;
+
+ firstIteration = false;
+
+ candidatesThisRound.sort((a, b) => b.weightedScore - a.weightedScore);
+
+ if (allSelected.length < maxCards) {
+ let slotsLeft = maxCards - allSelected.length;
+ let toAdd = candidatesThisRound.slice(0, slotsLeft);
+ for (let cand of toAdd) {
+ for (let c of cand.cards) {
+ usedOverallTitles.add(getCardTitle(c));
+ }
+ allSelected.push(cand);
+ let block = candidateToPlainText(cand);
+ if (block) workingText += '\n' + block;
+ }
+ } else {
+ let worstIdx = 0;
+ for (let i = 1; i < allSelected.length; i++) {
+ if (allSelected[i].weightedScore < allSelected[worstIdx].weightedScore) worstIdx = i;
+ }
+ let worstScore = allSelected[worstIdx].weightedScore;
+
+ for (let cand of candidatesThisRound) {
+ if (cand.weightedScore <= worstScore) break;
+ allSelected[worstIdx] = cand;
+ for (let c of cand.cards) {
+ usedOverallTitles.add(getCardTitle(c));
+ }
+ let block = candidateToPlainText(cand);
+ if (block) workingText += '\n' + block;
+ worstScore = Infinity;
+ for (let i = 0; i < allSelected.length; i++) {
+ if (allSelected[i].weightedScore < worstScore) {
+ worstScore = allSelected[i].weightedScore;
+ worstIdx = i;
+ }
+ }
+ }
+ if (worstScore >= allSelected[worstIdx].weightedScore) break;
+ }
+ }
+
+ console.log(`[SCE] Cascade iterations completed, selected: ${allSelected.length}`);
+ allSelected.sort((a, b) => b.weightedScore - a.weightedScore);
+ return allSelected;
+}
+
+// ============================================================================
+// Main
+// ============================================================================
+
+function StoryCardExtensionContext(text) {
+ if (typeof state === 'undefined') { state = {}; }
+
+ let configCard = ensureConfigCard();
+ if (!configCard) return text;
+
+ let config = readConfigFromCard(configCard);
+ let allCards = getAllStoryCards();
+ if (!allCards || allCards.length === 0) return text;
+
+ let { eventCards, regularCards } = categorizeCards(allCards, config.useOnlyAutouseCards);
+
+ let usedCardTitles = new Set();
+ let definedTitlesSetForAll = new Set();
+
+ let alwaysBlock = null;
+ if (config.alwaysIncludeCards && config.alwaysIncludeCards.length > 0) {
+ let cardMap = new Map();
+ for (let card of allCards) {
+ let title = getCardTitle(card);
+ if (title) cardMap.set(title, card);
+ }
+ let foundCards = [];
+ for (let name of config.alwaysIncludeCards) {
+ let card = cardMap.get(name);
+ if (card) {
+ let title = getCardTitle(card);
+ if (!usedCardTitles.has(title)) {
+ foundCards.push(card);
+ usedCardTitles.add(title);
+ }
+ }
+ }
+ alwaysBlock = formatAlwaysCardsBlock(foundCards);
+ }
+
+ if (typeof info !== 'undefined' && info.lastOutput !== undefined) {
+ if (state.lastOutput === undefined) state.lastOutput = info.lastOutput;
+ state.isRetry = (info.lastOutput === state.lastOutput);
+ state.lastOutput = info.lastOutput;
+ } else if (typeof info !== 'undefined' && info.actionCount !== undefined) {
+ if (state.lastActionCount === undefined) state.lastActionCount = info.actionCount;
+ state.isRetry = (info.actionCount === state.lastActionCount);
+ state.lastActionCount = info.actionCount;
+ } else {
+ state.isRetry = false;
+ }
+
+ if (!state.currentEvent) {
+ state.currentEvent = { text: null, title: null, duration: 0 };
+ }
+
+ if (config.currentEventTitle === "" && state.currentEvent.duration > 0) {
+ state.currentEvent = { text: null, title: null, duration: 0 };
+ writeConfigToCard(configCard, config);
+ } else if (config.currentEventDurationLeft === 0 && state.currentEvent.duration > 0) {
+ state.currentEvent = { text: null, title: null, duration: 0 };
+ config.currentEventTitle = "";
+ config.currentEventDurationLeft = 0;
+ writeConfigToCard(configCard, config);
+ } else if (config.currentEventTitle !== "" && config.currentEventTitle !== state.currentEvent.title) {
+ let foundEvent = eventCards.find(c => getCardTitle(c) === config.currentEventTitle);
+ if (foundEvent) {
+ state.currentEvent.text = formatEventCard(foundEvent);
+ state.currentEvent.title = config.currentEventTitle;
+ state.currentEvent.duration = config.currentEventDurationLeft;
+ } else {
+ state.currentEvent = { text: null, title: null, duration: 0 };
+ config.currentEventTitle = "";
+ config.currentEventDurationLeft = 0;
+ writeConfigToCard(configCard, config);
+ }
+ } else if (config.currentEventDurationLeft !== state.currentEvent.duration && config.currentEventTitle === state.currentEvent.title) {
+ state.currentEvent.duration = config.currentEventDurationLeft;
+ }
+
+ if (state.currentEvent.duration === 0 && state.currentEvent.title !== null) {
+ state.currentEvent = { text: null, title: null, duration: 0 };
+ config.currentEventTitle = "";
+ config.currentEventDurationLeft = 0;
+ writeConfigToCard(configCard, config);
+ }
+
+ let recallBlocks = [];
+ let topRecallBlocks = [];
+
+ if (config.contextRecallEnabled && regularCards.length > 0) {
+ let candidates = selectRecallCandidates(text, allCards, regularCards, config);
+
+ let ancestorTitles = new Set();
+ for (let cand of candidates) {
+ if (cand.type === 'hierarchy' && cand.cards && cand.cards.length > 1) {
+ for (let i = 0; i < cand.cards.length - 1; i++) {
+ ancestorTitles.add(getCardTitle(cand.cards[i]));
+ }
+ }
+ }
+ candidates = candidates.filter(cand => {
+ if (cand.type === 'single' && ancestorTitles.has(getCardTitle(cand.card))) {
+ return false;
+ }
+ return true;
+ });
+
+ definedTitlesSetForAll.clear();
+ let definitionCards = [];
+ for (let cand of candidates) {
+ if (cand.type === 'hierarchy' && cand.cards && cand.cards.length > 1) {
+ for (let i = 0; i < cand.cards.length - 1; i++) {
+ let card = cand.cards[i];
+ let title = getCardTitle(card);
+ if (!definedTitlesSetForAll.has(title)) {
+ definedTitlesSetForAll.add(title);
+ definitionCards.push(card);
+ }
+ }
+ }
+ }
+
+ let definitionsBlock = null;
+ if (definitionCards.length > 0) {
+ definitionsBlock = formatDefinitionsBlock(definitionCards);
+ }
+
+ let hierarchyStrings = [];
+ for (let cand of candidates) {
+ if (cand.type === 'hierarchy') {
+ let hasUndefinedCard = cand.cards.some(card => !definedTitlesSetForAll.has(getCardTitle(card)));
+ if (!hasUndefinedCard) {
+ continue;
+ }
+ let hierStr = formatHierarchy(cand.cards, definedTitlesSetForAll);
+ if (hierStr) hierarchyStrings.push(hierStr);
+ }
+ }
+
+ let hierarchiesBlock = null;
+ if (hierarchyStrings.length > 0) {
+ hierarchiesBlock = formatAllHierarchies(hierarchyStrings);
+ }
+
+ let singleCardsList = [];
+ for (let cand of candidates) {
+ if (cand.type === 'single') {
+ let title = getCardTitle(cand.card);
+ if (!usedCardTitles.has(title)) {
+ singleCardsList.push(cand.card);
+ usedCardTitles.add(title);
+ }
+ }
+ }
+ let singleBlocks = [];
+ if (singleCardsList.length > 0) {
+ let block = formatRecallSingle(singleCardsList);
+ if (block) singleBlocks.push(block);
+ }
+
+ let fullRecallContent = [];
+ if (definitionsBlock) fullRecallContent.push(definitionsBlock);
+ if (hierarchiesBlock) fullRecallContent.push(hierarchiesBlock);
+ fullRecallContent.push(...singleBlocks);
+
+ if (fullRecallContent.length > 0) {
+ if (config.recallInsertPosition === 'bot') {
+ recallBlocks = fullRecallContent;
+ } else {
+ topRecallBlocks = fullRecallContent;
+ }
+ }
+ }
+
+ let randomCardBlock = null;
+ if (regularCards.length > 0 && Math.random() < config.randomCardChance) {
+ let selectedCard = config.useCardWeights
+ ? selectCardByWeight(regularCards)
+ : regularCards[Math.floor(Math.random() * regularCards.length)];
+ if (selectedCard) {
+ let title = getCardTitle(selectedCard);
+ if (!usedCardTitles.has(title)) {
+ let block = null;
+ let parent = getCardParent(selectedCard);
+ if (parent) {
+ let hierarchy = getCardHierarchy(selectedCard, allCards);
+ if (hierarchy && hierarchy.length) {
+ let newCards = [];
+ for (let card of hierarchy) {
+ let t = getCardTitle(card);
+ if (!usedCardTitles.has(t)) {
+ newCards.push(card);
+ usedCardTitles.add(t);
+ }
+ }
+ if (newCards.length > 0) {
+ let hierStr = formatHierarchy(newCards, definedTitlesSetForAll);
+ if (hierStr) {
+ block = `[Current hierarchies (each sub-item is part of the parent item above):\n${hierStr}\n]`;
+ }
+ }
+ }
+ } else {
+ block = formatRandomCard(selectedCard);
+ if (block) usedCardTitles.add(title);
+ }
+ if (block) {
+ randomCardBlock = block;
+ }
+ }
+ }
+ }
+
+ let newText = text;
+
+ for (let block of topRecallBlocks) {
+ newText = block + '\n\n' + newText;
+ }
+
+ let bottomBlocks = [];
+
+ if (alwaysBlock) bottomBlocks.push(alwaysBlock);
+ if (config.recallInsertPosition === 'bot') {
+ bottomBlocks.push(...recallBlocks);
+ }
+ if (randomCardBlock) bottomBlocks.push(randomCardBlock);
+
+ for (let block of bottomBlocks) {
+ newText = newText + '\n\n' + block;
+ }
+
+ if (state.currentEvent.duration > 0) {
+ if (state.currentEvent.text) {
+ let eventTitle = state.currentEvent.title;
+ if (!usedCardTitles.has(eventTitle)) {
+ newText = newText + '\n\n' + state.currentEvent.text;
+ usedCardTitles.add(eventTitle);
+ }
+ }
+ if (!state.isRetry) {
+ state.currentEvent.duration--;
+ if (state.currentEvent.duration === 0) {
+ state.currentEvent = { text: null, title: null, duration: 0 };
+ config.currentEventTitle = "";
+ config.currentEventDurationLeft = 0;
+ writeConfigToCard(configCard, config);
+ } else {
+ config.currentEventDurationLeft = state.currentEvent.duration;
+ writeConfigToCard(configCard, config);
+ }
+ }
+ } else {
+ if (eventCards.length > 0 && Math.random() < config.randomEventChance) {
+ let selectedCard = config.useEventWeights
+ ? selectEventByWeight(eventCards)
+ : eventCards[Math.floor(Math.random() * eventCards.length)];
+ if (selectedCard) {
+ let title = getCardTitle(selectedCard);
+ if (!usedCardTitles.has(title)) {
+ let block = formatEventCard(selectedCard);
+ if (block) {
+ let duration = getEventDuration(selectedCard, config.eventDuration);
+ state.currentEvent = { text: block, title: title, duration: duration };
+ config.currentEventTitle = title;
+ config.currentEventDurationLeft = duration;
+ writeConfigToCard(configCard, config);
+ newText = newText + '\n\n' + block;
+ usedCardTitles.add(title);
+ }
+ }
+ }
+ }
+ }
+
+ return newText;
+}
+
+// =============================================================================
+// Stackable Inventory System (SIS) v0.6 — integrated from https://better-repository.netlify.app/scripts
+// SIS by bottledfox — lightweight, plug-and-play inventory with slash commands.
+// Commands: /take, /use, /drop, /give, /throw, /collect, /undo, plus custom commands.
+// An "Inventory" and "Custom Commands" story card are created automatically.
+// =============================================================================
+
+// ===== Stackable Inventory System & Wallet (SIS) v 0.6 =====
+// script by bottledfox
+
+// ---------------------------------------------------------------------------
+// 0) Constants
+// ---------------------------------------------------------------------------
+
+const INVENTORY_CARD_NAME = "Inventory";
+const INVENTORY_HEADER = "## Inventory";
+const WALLET_HEADER = "## Wallet";
+const CUSTOM_COMMAND_CARD_NAME = "Custom Commands";
+const CUSTOM_COMMAND_HEADER = "## Custom Commands";
+const INVENTORY_ITEM_CAP = 99;
+
+// ---------------------------------------------------------------------------
+// Currency alias table — maps alternate names to a canonical currency key.
+// Keys and values are matched case-insensitively; values should be lowercase.
+// Creators: edit this before publishing to match your scenario's terminology.
+// Example:
+//   const CURRENCY_ALIASES = { "bucks": "dollars", "buck": "dollars",
+//     "cash": "dollars", "bills": "dollars", "gp": "gold", "sp": "silver" };
+// ---------------------------------------------------------------------------
+const CURRENCY_ALIASES = {};
+
+// Normalize a currency name: lowercase + optional alias resolution.
+// All wallet read/write paths go through this so the system is fully
+// case-insensitive and alias-aware end-to-end.
+function normalizeCurrency(name) {
+    const lower = String(name || "").trim().toLowerCase();
+    return CURRENCY_ALIASES[lower] || lower;
+}
+
+// ---------------------------------------------------------------------------
+// 1) Inventory State & Card
+// ---------------------------------------------------------------------------
+
+// State guard: ensure state.vars.inventory exists and is an array
+function ensureInventoryState() {
+    if (!state.vars) state.vars = {};
+    if (!Array.isArray(state.vars.inventory)) state.vars.inventory = [];
+    return state.vars.inventory;
+}
+
+// Story-card guard: ensure a single "Inventory" card exists in the global storyCards
+function ensureInventoryCard() {
+    if (!Array.isArray(storyCards)) storyCards = []; // AID global; guard it.
+    let card = storyCards.find(c => c?.title === INVENTORY_CARD_NAME);
+    if (!card) {
+        card = {
+            type: "list",
+            title: INVENTORY_CARD_NAME,
+            keys: INVENTORY_CARD_NAME, // matches your other cards' pattern
+            description: "",
+            entry: `${WALLET_HEADER}\n- (empty)\n\n${INVENTORY_HEADER}\n- (empty)\n`
+        };
+        storyCards.push(card);
+    }
+    return card;
+}
+
+function rebuildInventoryCardFromState() {
+    const inv = ensureInventoryState();
+    const card = ensureInventoryCard();
+
+    // --- wallet (always render first) ---
+    const walletLines = renderWalletLines();
+    let walletBlock = `${WALLET_HEADER}\n${walletLines.join("\n")}\n`;
+
+    // --- inventory list (unchanged logic, just moved under wallet) ---
+    if (!inv.length) {
+        card.entry = `${walletBlock}\n${INVENTORY_HEADER}\n- (empty)\n`;
+        return card;
+    }
+
+    const counts = Object.create(null);
+    for (const s of inv) {
+        const name = String(s || "").trim();
+        if (!name) continue;
+        counts[name] = (counts[name] || 0) + 1;
+    }
+
+    const lines = Object.keys(counts)
+        .sort((a, b) => a.localeCompare(b))
+        .map(name => `- ${name} x ${counts[name]}`);
+
+    card.entry = `${walletBlock}\n${INVENTORY_HEADER}\n${lines.join("\n")}\n`;
+    return card;
+}
+
+// Case-insensitive count of a given item name in inventory
+function countInInventory(name) {
+    if (!state.vars) state.vars = {};
+    if (!Array.isArray(state.vars.inventory)) state.vars.inventory = [];
+    const k = name.toLowerCase();
+    return state.vars.inventory.filter(s => String(s).toLowerCase() === k).length;
+}
+
+// Remove up to n copies of a given name (case-insensitive), scanning from the end
+function removeFromInventory(name, n) {
+    if (!state.vars) state.vars = {};
+    if (!Array.isArray(state.vars.inventory)) state.vars.inventory = [];
+    let remaining = n;
+    for (let i = state.vars.inventory.length - 1; i >= 0 && remaining > 0; i--) {
+        if (String(state.vars.inventory[i]).toLowerCase() === name.toLowerCase()) {
+            state.vars.inventory.splice(i, 1);
+            remaining--;
+        }
+    }
+    return n - remaining;
+}
+
+// Add up to `amount` copies without exceeding the cap.
+function addToInventoryCapped(name, amount, cap = INVENTORY_ITEM_CAP) {
+    ensureInventoryState();
+    const have = countInInventory(name);                 // case-insensitive
+    const want = Math.max(0, amount | 0);
+    const room = Math.max(0, cap - have);
+    const toAdd = Math.min(want, room);
+
+    for (let i = 0; i < toAdd; i++) state.vars.inventory.push(name);
+    return { added: toAdd, blocked: want - toAdd, newCount: have + toAdd, cap };
+}
+
+// ---------------------------------------------------------------------------
+// 2) Wallet State + Card Rendering
+// ---------------------------------------------------------------------------
+
+function ensureWalletState() {
+    if (!state.vars) state.vars = {};
+    if (!state.vars.wallet || typeof state.vars.wallet !== "object") {
+        state.vars.wallet = Object.create(null);
+    }
+    // One-time migration: normalize pre-existing mixed-case wallet keys.
+    // Runs once per adventure (flag stored in state), then becomes a no-op.
+    if (!state.vars.walletNormalized) {
+        const old = state.vars.wallet;
+        const fresh = Object.create(null);
+        for (const k of Object.keys(old)) {
+            const nk = normalizeCurrency(k);
+            fresh[nk] = (fresh[nk] || 0) + (Number(old[k]) || 0);
+        }
+        state.vars.wallet = fresh;
+        state.vars.walletNormalized = true;
+    }
+    return state.vars.wallet;
+}
+
+function walletAmount(currency) {
+    const w = ensureWalletState();
+    const key = normalizeCurrency(currency);
+    return Number(w[key] || 0);
+}
+
+function addToWallet(currency, amount) {
+    const w = ensureWalletState();
+    const key = normalizeCurrency(currency);
+    const delta = Number(amount || 0);
+    if (!key || !Number.isFinite(delta)) return { ok: false, newAmount: walletAmount(currency) };
+    const next = (w[key] || 0) + delta;
+    w[key] = next;
+    return { ok: true, newAmount: next };
+}
+
+function renderWalletLines() {
+    const w = ensureWalletState();
+    const keys = Object.keys(w).filter(k => Number.isFinite(w[k]) && w[k] !== 0);
+    if (keys.length === 0) return [`- (empty)`];
+    keys.sort((a, b) => a.localeCompare(b));
+    // Keys are stored lowercase; display with Title Case for readability.
+    return keys.map(k => {
+        const label = k.split(" ").map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(" ");
+        return `- ${label}: ${w[k]}`;
+    });
+}
+
+// ---------------------------------------------------------------------------
+// 3) Parsing Helpers
+// ---------------------------------------------------------------------------
+
+// Escape a literal for safe insertion into a RegExp
+function rxEscape(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+
+// Try to match the name of an inventory item at the start of the args
+function matchItem(args, invOverride) {
+    const argsStr = String(args || "").trim();
+    if (!argsStr) return null;
+
+    const inv = Array.isArray(invOverride)
+        ? invOverride
+        : (state?.vars && Array.isArray(state.vars.inventory) ? state.vars.inventory : []);
+
+    if (!inv.length) return null;
+
+    // Build unique canonical names
+    const seen = new Set();
+    const uniq = [];
+    for (const s of inv) {
+        const name = String(s || "").trim();
+        if (!name) continue;
+        const key = name.toLowerCase();
+        if (!seen.has(key)) {
+            seen.add(key);
+            uniq.push(name);
+        }
+    }
+
+    // Prefer longest to avoid prefix-capture collisions
+    uniq.sort((a, b) => b.length - a.length);
+
+    for (const name of uniq) {
+        const rx = new RegExp("^\\s*" + rxEscape(name) + "(?=[\\s,.;:!?)]|$)", "i");
+        const m = argsStr.match(rx);
+        if (m) {
+            return {
+                itemName: name,
+                remainder: argsStr.slice(m[0].length).trim()
+            };
+        }
+    }
+    return null;
+}
+// Normalize AID "You ..." prefixes and anything before the first slash.
+function normalizeCommandText(text) {
+    let t = String(text || "");
+
+    // Drop leading "> You ..." narrations and punctuation
+    t = t.replace(/^\s*>\s*you\b[:\-]?\s*/i, "");
+    t = t.replace(/^[^/]*?(?=\/)/, "");
+    t = t.replace(/[.,]/g, "");
+    t = t.replace(/[!?]+$/, "");
+
+    return t.trim();
+}
+
+// Extract "/name" and the rest as args
+function parseSlashCommand(text) {
+    const t = normalizeCommandText(text);
+    const m = t.match(/^\/([a-z][a-z0-9_]*)\b(?:\s+(.*))?$/i);
+    if (!m) return null;
+    return { name: m[1].toLowerCase(), args: (m[2] || "").trim() };
+}
+
+// Split "a, b, c" into parts; trims whitespace and strips trailing ASCII periods
+function parseCSVArgs(argStr) {
+    if (!argStr) return [];
+    return argStr.split(",").map(s => s.trim().replace(/\.+$/, "")).filter(Boolean);
+}
+
+// Try to match a wallet currency name at the start of args
+function matchWallet(args) {
+    const tokens = String(args || "").trim().split(/\s+/).filter(Boolean);
+    if (!tokens.length) return null;
+
+    const maybeName = tokens[0];
+    if (walletAmount(maybeName) > 0) {
+        return {
+            itemName: maybeName,
+            remainder: tokens.slice(1).join(" ")
+        };
+    }
+    return null;
+}
+
+function parseAmount(argStr, defaultAmount = 1) {
+    const tokens = String(argStr || "").trim().split(/\s+/).filter(Boolean);
+    if (tokens.length && /^\d+$/.test(tokens[0])) {
+        const amt = parseInt(tokens[0], 10);
+        return { amount: amt, remainder: tokens.slice(1).join(" ") };
+    }
+    return { amount: defaultAmount, remainder: argStr };
+}
+
+function parseItemAndAmount(args, defaultAmount = 1) {
+    let amount = defaultAmount;
+    let itemName = null;
+    let tail = "";
+
+    const tokens = String(args || "").trim().split(/\s+/);
+
+    if (/^\d+$/.test(tokens[0])) {
+        // Case A: amount first
+        amount = parseInt(tokens[0], 10);
+        const rest = tokens.slice(1).join(" ");
+        let match = matchItem(rest) || matchWallet(rest);
+        if (!match) return null;
+        itemName = match.itemName;
+
+        const amtParse = parseAmount(match.remainder, amount);
+        amount = amtParse.amount;
+        tail = parseTail(amtParse.remainder);
+    } else {
+        // Case B: item first
+        let match = matchItem(args) || matchWallet(args);
+        if (!match) return null;
+        itemName = match.itemName;
+
+        const amtParse = parseAmount(match.remainder, 1);
+        amount = amtParse.amount;
+        tail = parseTail(amtParse.remainder);
+    }
+
+    return { itemName, amount, tail };
+}
+
+// Just turn leftover string into a tail (leading space if nonempty)
+function parseTail(argStr) {
+    const t = String(argStr || "").trim();
+    return t ? ` ${t}` : "";
+}
+
+function parseItemName(argStr) {
+    return String(argStr || "").trim();
+}
+
+// ---------------------------------------------------------------------------
+// 4) Core Command Handlers
+// ---------------------------------------------------------------------------
+
+// /take command
+function handleTakeCommand(text) {
+    const cmd = parseSlashCommand(text);
+    if (!cmd || cmd.name !== "take") return null;
+
+    const args = String(cmd.args || "").trim();
+    if (!args) return "⚠️ Format: /take [amount] [itemName]";
+
+    let amount = 1;
+    let itemName = "";
+
+    const tokens = args.split(/\s+/);
+
+    if (/^\d+$/.test(tokens[0])) {
+        // Case A: amount first
+        amount = parseInt(tokens[0], 10);
+        itemName = parseItemName(tokens.slice(1).join(" "));
+    } else {
+        // Case B: item first (defaults to 1)
+        itemName = parseItemName(args);
+    }
+
+    if (!itemName || !Number.isFinite(amount) || amount <= 0) {
+        return "⚠️ Format: /take [amount] [itemName]";
+    }
+
+    ensureInventoryState();
+
+    // Gate like custom adds
+    if (state?.vars?.awaitingGate) {
+        return "⚠️ An inventory check is already in progress. Try again next turn.";
+    }
+    if (!state.vars) state.vars = {};
+    state.vars.pendingAdd = {
+        itemName,
+        amount,
+        verb: "take",
+        cmdName: "take"
+    };
+
+    if (typeof startInventoryGate === "function") startInventoryGate();
+
+    return amount === 1
+        ? `You attempt to take ${itemName}...`
+        : `You attempt to take ${amount} × ${itemName}...`;
+}
+
+// /use command
+function handleUseCommand(text) {
+    const cmd = parseSlashCommand(text);
+    if (!cmd || cmd.name !== "use") return null;
+
+    const match = (typeof matchItem === "function") ? matchItem(cmd.args) : null;
+    if (!match) return "⚠️ Couldn’t find that item in your inventory.";
+
+    const { itemName, remainder } = match;
+
+    const have = countInInventory(itemName);
+    if (have < 1) return `⚠️ You don't have any ${itemName}.`;
+
+    removeFromInventory(itemName, 1); // consume one item
+    if (typeof rebuildInventoryCardFromState === "function") rebuildInventoryCardFromState();
+
+    const tail = remainder ? ` ${remainder}` : "";
+    return `You use ${itemName}${tail}`;
+}
+
+// /drop command
+function handleDropCommand(text) {
+    const cmd = parseSlashCommand(text);
+    if (!cmd || cmd.name !== "drop") return null;
+
+    const args = String(cmd.args || "").trim();
+    if (!args) return "⚠️ Format: /drop [amount] [itemName] on [location (optional)]";
+
+    const parsed = parseItemAndAmount(args, 1);
+    if (!parsed) return "⚠️ Couldn’t find that item or currency.";
+    const { itemName, amount, tail } = parsed;
+
+    if (!itemName || !Number.isFinite(amount) || amount <= 0) {
+        return "⚠️ Amount must be a positive integer.";
+    }
+
+    // --- Wallet branch ---
+    if (walletAmount(itemName) > 0) {
+        if (walletAmount(itemName) < amount) {
+            return `⚠️ You only have ${walletAmount(itemName)} ${itemName}.`;
+        }
+        addToWallet(itemName, -amount);
+        recordInventoryAction("wallet_remove", itemName, amount, "drop");
+        if (typeof rebuildInventoryCardFromState === "function") rebuildInventoryCardFromState();
+        return amount === 1
+            ? `You drop 1 ${itemName}${tail}.`
+            : `You drop ${amount} ${itemName}${tail}.`;
+    }
+
+    // --- Inventory branch ---
+    const have = countInInventory(itemName);
+    if (have < amount) {
+        return `⚠️ You only have ${have} × ${itemName}.`;
+    }
+
+    removeFromInventory(itemName, amount);
+    recordInventoryAction("remove", itemName, amount, "drop")
+    if (typeof rebuildInventoryCardFromState === "function") rebuildInventoryCardFromState();
+
+    return amount === 1
+        ? `You drop ${itemName}${tail}.`
+        : `You drop ${amount} × ${itemName}${tail}.`;
+}
+
+// /give command
+function handleGiveCommand(text) {
+    const cmd = parseSlashCommand(text);
+    if (!cmd || cmd.name !== "give") return null;
+
+    const args = String(cmd.args || "").trim();
+    if (!args) return "⚠️ Format: /give [amount] [itemName] to [target]";
+
+    const parsed = parseItemAndAmount(args, 1);
+    if (!parsed) return "⚠️ Couldn’t find that item or currency.";
+
+    const { itemName, amount, tail } = parsed;
+
+    if (!itemName || !Number.isFinite(amount) || amount <= 0) {
+        return "⚠️ Amount must be a positive integer.";
+    }
+
+    // --- Wallet branch ---
+    if (walletAmount(itemName) > 0) {
+        if (walletAmount(itemName) < amount) {
+            return `⚠️ You only have ${walletAmount(itemName)} ${itemName}.`;
+        }
+        addToWallet(itemName, -amount);
+        recordInventoryAction("wallet_remove", itemName, amount, "give");
+        if (typeof rebuildInventoryCardFromState === "function") {
+            rebuildInventoryCardFromState();
+        }
+        return amount === 1
+            ? `You give 1 ${itemName}${tail}.`
+            : `You give ${amount} ${itemName}${tail}.`;
+    }
+
+    // --- Inventory branch ---
+    const haveItems = countInInventory(itemName);
+    if (haveItems < amount) {
+        return `⚠️ You only have ${haveItems} × ${itemName}.`;
+    }
+
+    removeFromInventory(itemName, amount);
+    recordInventoryAction("remove", itemName, amount, "give");
+    if (typeof rebuildInventoryCardFromState === "function") {
+        rebuildInventoryCardFromState();
+    }
+    return amount === 1
+        ? `You give ${itemName}${tail}.`
+        : `You give ${amount} × ${itemName}${tail}.`;
+}
+
+// /throw command
+function handleThrowCommand(text) {
+    const cmd = parseSlashCommand(text);
+    if (!cmd || cmd.name !== "throw") return null;
+
+    const args = String(cmd.args || "").trim();
+    if (!args) return "⚠️ Format: /throw [amount] itemName at [target]";
+
+    const parsed = parseItemAndAmount(args, 1);
+    if (!parsed) return "⚠️ Couldn’t find that item or currency.";
+    const { itemName, amount, tail } = parsed;
+
+    if (!itemName || !Number.isFinite(amount) || amount <= 0) {
+        return "⚠️ Amount must be a positive integer.";
+    }
+
+    // --- Wallet branch ---
+    if (walletAmount(itemName) > 0) {
+        if (walletAmount(itemName) < amount) {
+            return `⚠️ You only have ${walletAmount(itemName)} ${itemName}.`;
+        }
+        addToWallet(itemName, -amount);
+        recordInventoryAction("wallet_remove", itemName, amount, "drop");
+        if (typeof rebuildInventoryCardFromState === "function") rebuildInventoryCardFromState();
+        return amount === 1
+            ? `You throw 1 ${itemName}${tail}.`
+            : `You throw ${amount} ${itemName}${tail}.`;
+    }
+
+    // --- Inventory branch ---
+    const have = countInInventory(itemName);
+    if (have < amount) {
+        return `⚠️ You only have ${have} × ${itemName}.`;
+    }
+
+    removeFromInventory(itemName, amount);
+    recordInventoryAction("remove", itemName, amount, "drop");
+    if (typeof rebuildInventoryCardFromState === "function") rebuildInventoryCardFromState();
+
+    return amount === 1
+        ? `You throw ${itemName}${tail}.`
+        : `You throw ${amount} × ${itemName}${tail}.`;
+}
+
+// /collect command
+function handleCollectCommand(text) {
+    const cmd = parseSlashCommand(text);
+    if (!cmd || cmd.name !== "collect") return null;
+
+    if (!state.vars) state.vars = {};
+    if (state.vars.awaitingGate || state.vars.awaitingMoneyGate)
+        return "ERROR: Action is already pending.";
+
+    const args = String(cmd.args || "").trim();
+    if (!args) return "⚠️ Format: /collect [amount] [currency]";
+
+    let amount = 1;
+    let currency = "";
+
+    const tokens = args.split(/\s+/);
+
+    if (/^\d+$/.test(tokens[0])) {
+        // Case A: amount first
+        amount = parseInt(tokens[0], 10);
+        currency = parseItemName(tokens.slice(1).join(" "));
+    } else {
+        // Case B: currency first
+        currency = parseItemName(args);
+    }
+
+    if (!currency || !Number.isFinite(amount) || amount <= 0) {
+        return "⚠️ Format: /collect [amount] [currency]";
+    }
+
+    state.vars.pendingCollect = { currency, amount };
+
+    // Kick off wallet gate
+    startMoneyGate();
+    return `You attempt to collect ${amount} ${currency}...`;
+}
+
+// /undo command
+function handleUndoCommand(text) {
+    const cmd = parseSlashCommand(text);
+    if (!cmd || cmd.name !== "undo") return null;
+
+    if (!state?.vars?.invHistory || !state.vars.invHistory.length) {
+        return "⚠️ Nothing to undo.";
+    }
+
+    const last = state.vars.invHistory.pop();
+    let msg = "";
+
+    switch (last.kind) {
+        case "add":
+            removeFromInventory(last.itemName, last.amount);
+            msg = `Undo: added ${last.amount} × ${last.itemName}.`;
+            break;
+        case "remove":
+            addToInventoryCapped(last.itemName, last.amount);
+            msg = `Undo: removed ${last.amount} × ${last.itemName}.`;
+            break;
+        case "wallet_add":
+            addToWallet(last.itemName, -last.amount);
+            msg = `Undo: collected ${last.amount} ${last.itemName}.`;
+            break;
+        case "wallet_remove":
+            addToWallet(last.itemName, last.amount);
+            msg = `Undo: spent ${last.amount} ${last.itemName}.`;
+            break;
+    }
+
+    if (typeof rebuildInventoryCardFromState === "function") {
+        rebuildInventoryCardFromState();
+    }
+
+    return msg;
+}
+
+// ---------------------------------------------------------------------------
+// 5) Custom Commands System
+// ---------------------------------------------------------------------------
+
+function ensureCustomCommandCard() {
+    if (!Array.isArray(storyCards)) storyCards = []; // AID global; guard it.
+    let card = storyCards.find(c => c?.title === CUSTOM_COMMAND_CARD_NAME);
+    if (!card) {
+        card = {
+            type: "list",
+            title: CUSTOM_COMMAND_CARD_NAME,
+            keys: CUSTOM_COMMAND_CARD_NAME,
+            description: "",
+            entry:
+                `${CUSTOM_COMMAND_HEADER}
+  Name: /example
+  Type: add|remove
+  Multiples: true|false
+  `
+        };
+        storyCards.push(card);
+    }
+    return card;
+}
+
+// --- Read "Custom Commands" card config
+function readCustomCommandConfigs() {
+    if (!Array.isArray(storyCards)) return [];
+    const card = storyCards.find(c => c?.title === "Custom Commands");
+    if (!card || !card.entry) {
+        if (state?.vars) state.vars.customCommands = [];
+        return [];
+    }
+
+    const lines = String(card.entry).split(/\r?\n/);
+    const out = [];
+    let cur = null;
+
+    for (const raw of lines) {
+        const line = String(raw || "").trim();
+        if (!line) continue;
+
+        let m;
+        if ((m = line.match(/^Name:\s*\/([a-z][a-z0-9_]*)$/i))) {
+            if (cur && cur.name && cur.type) {
+                if (typeof cur.multiples !== "boolean") cur.multiples = false;
+                out.push(cur);
+            }
+            const raw = m[1];                    // preserve as typed (no slash)
+            cur = { name: raw.toLowerCase(), label: raw, type: null, multiples: false };
+            continue;
+        }
+        if (!cur) continue;
+
+        if ((m = line.match(/^Type:\s*(add|remove)$/i))) {
+            cur.type = m[1].toLowerCase(); continue;
+        }
+        if ((m = line.match(/^Multiples:\s*(true|false)$/i))) {
+            cur.multiples = /true/i.test(m[1]); continue;
+        }
+    }
+    if (cur && cur.name && cur.type) {
+        if (typeof cur.multiples !== "boolean") cur.multiples = false;
+        out.push(cur);
+    }
+
+    if (!state.vars) state.vars = {};
+    state.vars.customCommands = out;       // <-- store all parsed configs
+    return out;
+}
+
+// --- Dynamic custom commands
+function handleCustomCommand(text) {
+    const cfgs = readCustomCommandConfigs();
+    if (!cfgs.length) return null;
+
+    const cmd = parseSlashCommand(text);
+    if (!cmd) return null;
+
+    // If duplicate names exist, prefer the LAST definition in the card
+    const cfg = [...cfgs].reverse().find(c => c.name === cmd.name);
+    if (!cfg) return null; // not a custom command; let other handlers try
+
+    // Parse args with modern parser (supports amount-first, item-first, wallet)
+    const parsed = parseItemAndAmount(cmd.args, 1);
+    if (!parsed) {
+        return cfg.multiples
+            ? `⚠️ Format: /${cfg.name} [amount] itemName`
+            : `⚠️ Format: /${cfg.name} itemName`;
+    }
+
+    const { itemName, amount, tail } = parsed;
+    if (!itemName || !Number.isFinite(amount) || amount <= 0) {
+        return "⚠️ Amount must be a positive integer.";
+    }
+
+    ensureInventoryState();
+    const verb = cfg.label || cfg.name; // e.g. "stash", "donate"
+
+    // ADD branch
+    if (cfg.type === "add") {
+        if (state?.vars?.awaitingGate) {
+            return "⚠️ An inventory check is already in progress. Try again next turn.";
+        }
+        if (!state.vars) state.vars = {};
+        state.vars.pendingAdd = {
+            itemName,
+            amount,
+            verb,
+            cmdName: cfg.name
+        };
+
+        if (typeof startInventoryGate === "function") startInventoryGate();
+
+        return amount === 1
+            ? `You attempt to ${verb} ${itemName}${tail}...`
+            : `You attempt to ${verb} ${amount} × ${itemName}${tail}...`;
+    }
+
+    // REMOVE branch
+    // --- Wallet branch ---
+    if (walletAmount(itemName) > 0) {
+        if (walletAmount(itemName) < amount) {
+            return `⚠️ You only have ${walletAmount(itemName)} ${itemName}.`;
+        }
+        addToWallet(itemName, -amount);
+        recordInventoryAction("wallet_remove", itemName, amount, cfg.name);
+        if (typeof rebuildInventoryCardFromState === "function") {
+            rebuildInventoryCardFromState();
+        }
+        return amount === 1
+            ? `You ${verb} 1 ${itemName}${tail}`
+            : `You ${verb} ${amount} ${itemName}${tail}`;
+    }
+
+    // --- Inventory branch ---
+    const have = countInInventory(itemName);
+    if (have < amount) {
+        return `⚠️ You only have ${have} × ${itemName}.`;
+    }
+
+    removeFromInventory(itemName, amount);
+    recordInventoryAction("remove", itemName, amount, cfg.name);
+    if (typeof rebuildInventoryCardFromState === "function") {
+        rebuildInventoryCardFromState();
+    }
+
+    return amount === 1
+        ? `You ${verb} ${itemName}${tail}, removing it from your inventory.`
+        : `You ${verb} ${amount} × ${itemName}${tail}, removing them from your inventory.`;
+}
+
+// ---------------------------------------------------------------------------
+// 6) Gates (Validation Prompts)
+// ---------------------------------------------------------------------------
+
+// Start a 1-turn inventory gate via frontMemory (context-only)
+function startInventoryGate() {
+    const prompt = `
+  <SYSTEM> 
+  You are the rules arbiter for inventory changes. Before narrating, quickly verify the requested change(s) against story context.
+
+  Approve only if the item(s) are:
+  - Explicitly obtainable
+  - Reasonable in size and quantity
+  - Not a living creature
+
+  Output exactly one line (verbatim keys):
+  APPROVE or REJECT
+  Then continue the story.
+  </SYSTEM>`.trim();
+
+    if (!state.vars) state.vars = {};
+    state.vars.gateKind = "inv";
+    state.vars.awaitingGate = true;
+    state.vars.lastGateVerdict = null;
+    state.vars.gateStartedAt = (typeof info !== "undefined" ? info.actionCount : 0);
+    if (!state.memory) state.memory = {};
+    state.memory.frontMemory = prompt;
+}
+
+function startMoneyGate() {
+    const prompt = `
+  <SYSTEM>
+  You are the rules arbiter for wallet transactions. Before narrating, quickly verify the requested change(s) against story context.
+
+  Approve only if the item(s) are:
+  - Explicitly obtainable
+  - Reasonable in quantity
+  - Not a living creature
+  - Plausibly a currency in this story's setting 
+
+  Output exactly one line (verbatim keys):
+  APPROVE or REJECT
+  Then continue the story.
+  </SYSTEM>`.trim();
+
+    if (!state.vars) state.vars = {};
+    state.vars.gateKind = "wallet";
+    state.vars.awaitingGate = true;
+    state.vars.lastGateVerdict = null;
+    state.vars.gateStartedAt = (typeof info !== "undefined" ? info.actionCount : 0);
+    if (!state.memory) state.memory = {};
+    state.memory.frontMemory = prompt;
+}
+
+function clearUnifiedGate() {
+    if (!state.vars) state.vars = {};
+    state.vars.gateKind = null;
+    state.vars.lastGateVerdict = null;
+    state.vars.awaitingGate = false;
+}
+
+
+// Helper: clear the system prompt injected into frontMemory by a gate
+function removeGateText() {
+    if (state?.memory) state.memory.frontMemory = "";
+}
+
+// ---------------------------------------------------------------------------
+// 7) Action Logging
+// ---------------------------------------------------------------------------
+
+function recordInventoryAction(kind, itemName, amount, source = null) {
+    if (!state?.vars) state.vars = {};
+    if (!Array.isArray(state.vars.invHistory)) state.vars.invHistory = [];
+
+    // Keep only a few records to prevent memory bloat
+    if (state.vars.invHistory.length > 20) state.vars.invHistory.shift();
+
+    state.vars.invHistory.push({
+        kind,       // "add" | "remove" | "wallet_add" | "wallet_remove"
+        itemName,
+        amount,
+        source,     // optional: command name like "take" or "drop"
+        ts: Date.now()
+    });
+}
