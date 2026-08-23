@@ -31,6 +31,20 @@ const modifier = (text) => {
   ensureInventoryCard();
   ensureCustomCommandCard();
 
+  // SIS: Auto-clear a stuck gate after 2 turns without a verdict.
+  // Free-tier models may not reliably output APPROVE/REJECT; without this,
+  // state.vars.awaitingGate stays true forever and blocks all future commands.
+  try {
+    if (state?.vars?.awaitingGate &&
+        typeof state.vars.gateStartedAt === "number" &&
+        typeof info !== "undefined" &&
+        info.actionCount > state.vars.gateStartedAt + 2) {
+      state.vars.lastGateVerdict = "REJECT";
+      state.vars.awaitingGate = false;
+      if (state?.memory) state.memory.frontMemory = "";
+    }
+  } catch { }
+
   // SIS: Finalize gated operations depending on kind of gate (wallet vs inv)
   try {
     const kind = state?.vars?.gateKind || null;

@@ -8877,9 +8877,12 @@ function getAllStoryCards() {
 function categorizeCards(allCards, useOnlyAutouse) {
  let eventCards = [];
  let regularCandidates = [];
+ // SIS system cards contain script infrastructure, not world info — exclude from SCE recall
+ const SIS_SYSTEM_TITLES = new Set(['inventory', 'custom commands']);
  for (let card of allCards) {
  let title = getCardTitle(card);
  if (title.toLowerCase().includes('config')) continue;
+ if (SIS_SYSTEM_TITLES.has(title.toLowerCase())) continue;
 
  if (isEventCard(card)) {
  eventCards.push(card);
@@ -10357,7 +10360,7 @@ function handleTakeCommand(text) {
     ensureInventoryState();
 
     // Gate like custom adds
-    if (state?.vars?.awaitingInvGate) {
+    if (state?.vars?.awaitingGate) {
         return "⚠️ An inventory check is already in progress. Try again next turn.";
     }
     if (!state.vars) state.vars = {};
@@ -10782,6 +10785,8 @@ function startInventoryGate() {
     state.vars.gateKind = "inv";
     state.vars.awaitingGate = true;
     state.vars.lastGateVerdict = null;
+    state.vars.gateStartedAt = (typeof info !== "undefined" ? info.actionCount : 0);
+    if (!state.memory) state.memory = {};
     state.memory.frontMemory = prompt;
 }
 
@@ -10805,6 +10810,8 @@ function startMoneyGate() {
     state.vars.gateKind = "wallet";
     state.vars.awaitingGate = true;
     state.vars.lastGateVerdict = null;
+    state.vars.gateStartedAt = (typeof info !== "undefined" ? info.actionCount : 0);
+    if (!state.memory) state.memory = {};
     state.memory.frontMemory = prompt;
 }
 
