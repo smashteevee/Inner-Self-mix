@@ -10061,6 +10061,24 @@ const CUSTOM_COMMAND_HEADER = "## Custom Commands";
 const INVENTORY_ITEM_CAP = 99;
 
 // ---------------------------------------------------------------------------
+// Currency alias table — maps alternate names to a canonical currency key.
+// Keys and values are matched case-insensitively; values should be lowercase.
+// Creators: edit this before publishing to match your scenario's terminology.
+// Example:
+//   const CURRENCY_ALIASES = { "bucks": "dollars", "buck": "dollars",
+//     "cash": "dollars", "bills": "dollars", "gp": "gold", "sp": "silver" };
+// ---------------------------------------------------------------------------
+const CURRENCY_ALIASES = {};
+
+// Normalize a currency name: lowercase + optional alias resolution.
+// All wallet read/write paths go through this so the system is fully
+// case-insensitive and alias-aware end-to-end.
+function normalizeCurrency(name) {
+    const lower = String(name || "").trim().toLowerCase();
+    return CURRENCY_ALIASES[lower] || lower;
+}
+
+// ---------------------------------------------------------------------------
 // 1) Inventory State & Card
 // ---------------------------------------------------------------------------
 
@@ -10160,18 +10178,30 @@ function ensureWalletState() {
     if (!state.vars.wallet || typeof state.vars.wallet !== "object") {
         state.vars.wallet = Object.create(null);
     }
+    // One-time migration: normalize pre-existing mixed-case wallet keys.
+    // Runs once per adventure (flag stored in state), then becomes a no-op.
+    if (!state.vars.walletNormalized) {
+        const old = state.vars.wallet;
+        const fresh = Object.create(null);
+        for (const k of Object.keys(old)) {
+            const nk = normalizeCurrency(k);
+            fresh[nk] = (fresh[nk] || 0) + (Number(old[k]) || 0);
+        }
+        state.vars.wallet = fresh;
+        state.vars.walletNormalized = true;
+    }
     return state.vars.wallet;
 }
 
 function walletAmount(currency) {
     const w = ensureWalletState();
-    const key = String(currency || "").trim();
+    const key = normalizeCurrency(currency);
     return Number(w[key] || 0);
 }
 
 function addToWallet(currency, amount) {
     const w = ensureWalletState();
-    const key = String(currency || "").trim();
+    const key = normalizeCurrency(currency);
     const delta = Number(amount || 0);
     if (!key || !Number.isFinite(delta)) return { ok: false, newAmount: walletAmount(currency) };
     const next = (w[key] || 0) + delta;
@@ -10183,9 +10213,12 @@ function renderWalletLines() {
     const w = ensureWalletState();
     const keys = Object.keys(w).filter(k => Number.isFinite(w[k]) && w[k] !== 0);
     if (keys.length === 0) return [`- (empty)`];
-    // stable alpha sort; feel free to swap to a priority list later
     keys.sort((a, b) => a.localeCompare(b));
-    return keys.map(k => `- ${k}: ${w[k]}`);
+    // Keys are stored lowercase; display with Title Case for readability.
+    return keys.map(k => {
+        const label = k.split(" ").map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(" ");
+        return `- ${label}: ${w[k]}`;
+    });
 }
 
 // ---------------------------------------------------------------------------
