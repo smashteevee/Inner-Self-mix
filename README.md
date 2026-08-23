@@ -28,6 +28,20 @@ In some ways this is the spiritual successor to [Auto-Cards](https://github.com/
 | **Visual Indicators** | See exactly which character is thinking at any given moment |
 | **Universal Compatibility** | General-purpose design works across diverse character archetypes and scenarios |
 | **Auto-Cards Integration** | Fully merged for comprehensive world-building (optional) |
+| **SCE Integration** | Story Card Extension runs alongside Inner Self for smart card recall and events |
+
+### SCE (Story Card Extension) Features
+
+[SCE](https://github.com/Kenflesh/SCE-Story-Card-Extension) is integrated into Inner Self and runs automatically. It enhances story cards with:
+
+| Feature | Description |
+|:--------|:------------|
+| **Context Recall** | Cards auto-trigger based on keyword similarity to recent story text — no trigger words needed |
+| **Parent Hierarchies** | Link cards (e.g. City → Tavern) so related cards surface together |
+| **Events** | Cards marked as "Event" type fire at random with configurable chance and duration |
+| **Always Include** | Pin specific cards into context every turn (more reliable than Plot Essentials) |
+| **Random Cards** | Optionally inject a random card each turn to spark unexpected story directions |
+| **Weighted Selection** | Add `weight=2` to a card's triggers to make it appear more (or less) often |
 
 ---
 
@@ -63,6 +77,7 @@ modifier(text);
 InnerSelf("context");
 const modifier = (text) => {
   // Any other context modifier scripts can go here
+  text = StoryCardExtensionContext(text);
   return { text, stop };
 };
 modifier(text);
@@ -110,6 +125,51 @@ All adventures played from your scenario will now include Inner Self (even exist
 
 ### Creator Control Panel
 At the very top of the Inner Self `Library` script tab, you'll find optional settings with simple explanations. Modify these before publishing to customize your scenario's default experience.
+
+### SCE Configuration
+When the adventure starts, a story card called **"SCE Config"** will be created automatically. All SCE settings are managed through it. You can also edit the default values at the top of the `Library` script (the `DEFAULT_CONFIG` block, near the `// StoryCard Extension` section header).
+
+<details>
+<summary><b>SCE default config values (click to expand)</b></summary>
+
+```javascript
+const DEFAULT_CONFIG = {
+  randomCardChance: 0.0,       // Chance each turn a random story card is injected
+  randomEventChance: 0.05,     // Chance each turn an Event card fires (5%)
+  useOnlyAutouseCards: false,  // true = only cards with "autouse" in Triggers are used
+  eventDuration: 2,            // How many turns an Event stays in context
+  useEventWeights: true,       // Respect weight= triggers for event selection
+  useCardWeights: true,        // Respect weight= triggers for random card selection
+  contextRecallEnabled: true,  // Master switch for keyword-based recall
+  contextRecallThreshold: 0.05,// Minimum match score for a card to be recalled
+  contextWindowChars: 10000,   // Recent story characters scanned for keywords
+  contextRecallMaxCards: 5,    // Max cards/hierarchies recalled per turn
+  recallInsertPosition: "bot", // "top" or "bot" — where recalled cards are injected
+  recallDecayRate: 0.995,      // Weight decay for older context tokens (1.0 = no decay)
+  cascadeEnabled: false,       // Iterative recall expansion for deeper card chains
+  cascadePriorityMultiplier: 1.3, // Score boost for descendants of already-recalled cards
+  alwaysIncludeCards: [],      // Card titles always injected every turn
+  customStopWords: [],         // Words to ignore during keyword matching
+};
+```
+
+**Key setting:** Set `useOnlyAutouseCards: true` if you want precise control — only cards with `autouse` written in their Triggers field will be used by SCE.
+
+</details>
+
+<details>
+<summary><b>SCE card trigger syntax (click to expand)</b></summary>
+
+Write triggers in the **Keys / Triggers** field of any story card:
+- `autouse` — marks the card for SCE (required when `useOnlyAutouseCards = true`)
+- `weight=2` — make SCE pay twice as much attention to this card
+- `weight=0` — exclude this card from SCE entirely
+- `parent=CityName` — attach this card to a parent card (builds hierarchy chains)
+- `event=10` — override event duration to 10 turns for this specific Event card
+
+Example triggers field: `autouse weight=1.5 parent=Kingdom of Larion`
+
+</details>
 
 ### Preparing Scenario NPCs
 To work on its own, provide Inner Self with the names of your scenario's most important NPCs. Inner Self will create a new brain card for each NPC you prepare, after their name appears in the story. (Kinda like story card triggers, if that makes sense!) Brains are created on-demand to avoid overwhelming players.
