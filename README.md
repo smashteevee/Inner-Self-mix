@@ -29,6 +29,7 @@ In some ways this is the spiritual successor to [Auto-Cards](https://github.com/
 | **Universal Compatibility** | General-purpose design works across diverse character archetypes and scenarios |
 | **Auto-Cards Integration** | Fully merged for comprehensive world-building (optional) |
 | **SCE Integration** | Story Card Extension runs alongside Inner Self for smart card recall and events |
+| **SIS Integration** | Stackable Inventory System adds slash-command inventory management to any scenario |
 
 ### SCE (Story Card Extension) Features
 
@@ -42,6 +43,33 @@ In some ways this is the spiritual successor to [Auto-Cards](https://github.com/
 | **Always Include** | Pin specific cards into context every turn (more reliable than Plot Essentials) |
 | **Random Cards** | Optionally inject a random card each turn to spark unexpected story directions |
 | **Weighted Selection** | Add `weight=2` to a card's triggers to make it appear more (or less) often |
+
+### SIS (Stackable Inventory System) Features
+
+[SIS](https://better-repository.netlify.app/scripts) by bottledfox is integrated and active automatically. It gives players a live story card that tracks items and currency:
+
+| Feature | Description |
+|:--------|:------------|
+| **Slash Commands** | `/take`, `/use`, `/drop`, `/give`, `/throw`, `/collect`, `/undo` — typed in Do mode |
+| **Auto-stacking** | Items of the same name are stacked with a count (e.g., `- Iron Sword x 3`) |
+| **Wallet** | Currency collected via `/collect [amount] [currency]` is tracked separately |
+| **Rules Gate** | When adding items, a quick AI check ensures they are obtainable before confirming |
+| **Custom Commands** | Add your own add/remove commands via the "Custom Commands" story card |
+| **Undo** | `/undo` reverses the last inventory or wallet action |
+| **Item Cap** | Each item is capped at 99 copies to prevent runaway accumulation |
+
+**Story cards created automatically:** "Inventory" (shows wallet + item list) and "Custom Commands" (define extra slash commands).
+
+**Command syntax:**
+```
+/take [amount] itemName       — pick up items (gated by AI rules check)
+/use itemName                 — consume one item from inventory
+/drop [amount] itemName       — remove items (or currency) from inventory
+/give [amount] itemName to X  — give items/currency to a target
+/throw [amount] itemName at X — throw items/currency
+/collect [amount] currency    — add currency to wallet (gated by AI rules check)
+/undo                         — undo last inventory or wallet change
+```
 
 ---
 
@@ -62,8 +90,23 @@ Inner Self is both free and open-source for anyone to use in their own scenarios
 8. Copy and paste the following code into your empty `Input` tab:
 ```javascript
 // Your "Input" tab should look like this
+
+// SIS: Ensure Inventory and Custom Commands cards exist on first load
+(function initCardsOnce() {
+    if (typeof ensureInventoryCard === "function") ensureInventoryCard();
+    if (typeof ensureCustomCommandCard === "function") ensureCustomCommandCard();
+})();
+
 InnerSelf("input");
 const modifier = (text) => {
+  // SIS: intercept slash commands before passing text to the AI
+  const reply =
+    handleCollectCommand(text) || handleCustomCommand(text) ||
+    handleDropCommand(text) || handleGiveCommand(text) ||
+    handleTakeCommand(text) || handleThrowCommand(text) ||
+    handleUndoCommand(text) || handleUseCommand(text);
+  if (reply) return { text: reply };
+
   // Any other input modifier scripts can go here
   return { text };
 };
@@ -85,15 +128,7 @@ modifier(text);
 12. Select the `Output` tab on the left
 13. Delete all code within said tab
 14. Copy and paste the following code into your empty `Output` tab:
-```javascript
-// Your "Output" tab should look like this
-InnerSelf("output");
-const modifier = (text) => {
-  // Any other output modifier scripts can go here
-  return { text };
-};
-modifier(text);
-```
+- [Output code](./src/output.js)
 15. Select the `Library` tab on the left
 16. Delete all code within said tab
 17. Open the Library code (hyperlink below) in a new browser tab
