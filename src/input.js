@@ -1,15 +1,17 @@
 // Your "Input" tab should look like this
 
-// SIS: Ensure Inventory and Custom Commands cards exist on first load
+// SIS + Stats: Ensure system cards exist on first load
 (function initCardsOnce() {
     if (typeof ensureInventoryCard === "function") ensureInventoryCard();
     if (typeof ensureCustomCommandCard === "function") ensureCustomCommandCard();
+    if (typeof ensureStatsCard === "function") ensureStatsCard();
 })();
 
 InnerSelf("input");
 const modifier = (text) => {
-  // SIS: intercept slash commands before passing text to the AI
+  // SIS + Stats: intercept slash commands before passing text to the AI
   const reply =
+    handleStatCommand(text) ||   // /stat (no-gate stat tracking)
     handleCollectCommand(text) || // /collect (adds currency to wallet)
     handleCustomCommand(text) ||  // dynamic commands from "Custom Commands" card
     handleDropCommand(text) ||    // /drop (removes items from inventory)
