@@ -26,10 +26,11 @@
 
 InnerSelf("output");
 const modifier = (text) => {
-  // SIS: Ensure all state and story cards are present each turn.
+  // SIS + Stats: Ensure all state and story cards are present each turn.
   ensureInventoryState();
   ensureInventoryCard();
   ensureCustomCommandCard();
+  ensureStatsCard();
 
   // SIS: Auto-clear a stuck gate after 2 turns without a verdict.
   // Free-tier models may not reliably output APPROVE/REJECT; without this,

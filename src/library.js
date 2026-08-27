@@ -10880,3 +10880,155 @@ function recordInventoryAction(kind, itemName, amount, source = null) {
         ts: Date.now()
     });
 }
+
+// =============================================================================
+// Stats Tracker
+// Tracks arbitrary named numeric stats via /stat commands — no gate, no AI
+// approval, immediate. Stats are stored in state.vars.stats and rendered into
+// a "Stats" story card that SCE can recall when contextually relevant.
+//
+// Commands:
+//   /stat name +N      increment stat by N (default 1 if N omitted)
+//   /stat name -N      decrement stat by N (default 1 if N omitted)
+//   /stat name =N      set stat to exact value N
+//   /stat name N       same as =N
+//   /stat name         show current value
+//   /stat reset name   reset one stat to 0
+//   /stat reset        reset ALL stats to 0
+//   /stat clear name   remove a stat entirely from the tracker
+//   /stat  (no args)   list all current stats
+//
+// Stat names: single words, letters/numbers/underscores.
+// Display: snake_case → Title Case; 2-letter names → UPPERCASE (hp→HP, xp→XP).
+// =============================================================================
+
+const STATS_CARD_NAME = "Stats";
+const STATS_HEADER = "## Stats";
+
+function ensureStatsState() {
+    if (!state.vars) state.vars = {};
+    if (!state.vars.stats || typeof state.vars.stats !== "object") {
+        state.vars.stats = Object.create(null);
+    }
+    return state.vars.stats;
+}
+
+function ensureStatsCard() {
+    if (!Array.isArray(storyCards)) storyCards = [];
+    let card = storyCards.find(c => c?.title === STATS_CARD_NAME);
+    if (!card) {
+        card = {
+            type: "list",
+            title: STATS_CARD_NAME,
+            keys: STATS_CARD_NAME,
+            description: "",
+            entry: `${STATS_HEADER}\n- (none)\n`
+        };
+        storyCards.push(card);
+    }
+    return card;
+}
+
+// Format a snake_case key for display:
+// 1-2 letter words → ALL CAPS (hp→HP, xp→XP, mp→MP)
+// longer words → Title Case (kills→Kills, goblin→Goblin)
+function formatStatLabel(key) {
+    return String(key || "").split("_").map(w =>
+        w.length <= 2 ? w.toUpperCase() : w.charAt(0).toUpperCase() + w.slice(1)
+    ).join(" ");
+}
+
+function rebuildStatsCard() {
+    const stats = ensureStatsState();
+    const card = ensureStatsCard();
+    const keys = Object.keys(stats).sort((a, b) => a.localeCompare(b));
+    if (!keys.length) {
+        card.entry = `${STATS_HEADER}\n- (none)\n`;
+        return card;
+    }
+    const lines = keys.map(k => `- ${formatStatLabel(k)}: ${stats[k]}`);
+    card.entry = `${STATS_HEADER}\n${lines.join("\n")}\n`;
+    return card;
+}
+
+function handleStatCommand(text) {
+    const norm = normalizeCommandText(text);
+    if (!/^\/stats?\b/i.test(norm)) return null;
+
+    const args = norm.replace(/^\/stats?\s*/i, "").trim();
+    const stats = ensureStatsState();
+
+    // /stat  (no args) — list all
+    if (!args) {
+        const keys = Object.keys(stats).sort();
+        if (!keys.length) return "No stats tracked yet. Use /stat name +1 to begin.";
+        return keys.map(k => `${formatStatLabel(k)}: ${stats[k]}`).join(" | ");
+    }
+
+    // /stat reset [key] — zero one stat or all stats
+    if (/^reset\b/i.test(args)) {
+        const rawKey = args.replace(/^reset\s*/i, "").trim();
+        if (rawKey) {
+            const key = rawKey.toLowerCase().replace(/\s+/g, "_").replace(/[^a-z0-9_]/g, "").replace(/^_+|_+$/g, "");
+            stats[key] = 0;
+            rebuildStatsCard();
+            return `${formatStatLabel(key)} reset to 0.`;
+        }
+        for (const k of Object.keys(stats)) stats[k] = 0;
+        rebuildStatsCard();
+        return "All stats reset to 0.";
+    }
+
+    // /stat clear key — remove a stat entirely
+    if (/^clear\b/i.test(args)) {
+        const rawKey = args.replace(/^clear\s*/i, "").trim();
+        if (!rawKey) return "⚠️ Format: /stat clear name";
+        const key = rawKey.toLowerCase().replace(/\s+/g, "_").replace(/[^a-z0-9_]/g, "").replace(/^_+|_+$/g, "");
+        if (key in stats) {
+            delete stats[key];
+            rebuildStatsCard();
+            return `${formatStatLabel(key)} removed from stats.`;
+        }
+        return `⚠️ No stat named "${key}".`;
+    }
+
+    // /stat name [op]
+    const tokens = args.split(/\s+/);
+    const key = tokens[0].toLowerCase().replace(/[^a-z0-9_]/g, "_").replace(/^_+|_+$/g, "");
+    if (!key) return "⚠️ Format: /stat name [+N | -N | =N | N]";
+
+    // Rejoin remaining tokens to handle cases like "= 5" or "+ 3"
+    const opStr = tokens.slice(1).join("").trim();
+
+    // No op → show current value
+    if (!opStr) {
+        const val = (key in stats) ? stats[key] : 0;
+        return `${formatStatLabel(key)}: ${val}`;
+    }
+
+    const current = (key in stats && typeof stats[key] === "number") ? stats[key] : 0;
+    let newVal;
+
+    if (opStr === "+" || opStr === "++") {
+        newVal = current + 1;
+    } else if (opStr === "-" || opStr === "--") {
+        newVal = current - 1;
+    } else if (opStr.startsWith("+")) {
+        const n = parseFloat(opStr.slice(1));
+        newVal = isNaN(n) ? current + 1 : current + n;
+    } else if (opStr.startsWith("-")) {
+        const n = parseFloat(opStr.slice(1));
+        newVal = isNaN(n) ? current - 1 : current - n;
+    } else if (opStr.startsWith("=")) {
+        newVal = parseFloat(opStr.slice(1).trim());
+        if (isNaN(newVal)) return "⚠️ Invalid value after =";
+    } else {
+        newVal = parseFloat(opStr);
+        if (isNaN(newVal)) return `⚠️ Format: /stat ${key} [+N | -N | =N | N]`;
+    }
+
+    // Store with up to 4 decimal places to avoid floating point drift
+    stats[key] = Math.round(newVal * 10000) / 10000;
+    rebuildStatsCard();
+    return `${formatStatLabel(key)}: ${stats[key]}`;
+}
